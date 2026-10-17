@@ -1,0 +1,26 @@
+[package]
+name = "tupleboard"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Пространство кортежей с арендами: доска для агентов, а не прямые вызовы"
+license = "MIT"
+readme = "README.md"
+
+# Зависимость одна и она про формат данных на проводе: JSON. Писать свой парсер JSON
+# ради «нуля зависимостей» — менять аудит на риск. HTTP, потоки, таймеры — std.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "tupleboard"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tupleboard"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+lto = true

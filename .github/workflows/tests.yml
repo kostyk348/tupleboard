@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Версия Rust
+        run: cargo --version && rustc --version
+      - name: Форматирование
+        run: cargo fmt --all -- --check
+      - name: Тесты
+        run: cargo test --all-targets
+      - name: Release-сборка
+        run: cargo build --release
+      - name: Демонстрация (аренды, kill -9, backpressure)
+        run: ./target/release/tupleboard demo
