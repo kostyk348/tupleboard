@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use tupleboard::pact::{Pact, PactBoard};
 use tupleboard::server::Server;
 use tupleboard::space::Space;
 use tupleboard::team::{Escalation, Evidence, Policy, Team, Verdict};
@@ -35,6 +36,7 @@ fn main() {
         Some("dump") => cmd_dump(&args[1..]),
         Some("demo") => cmd_demo(&args[1..]),
         Some("team") => cmd_team(&args[1..]),
+        Some("pact") => cmd_pact(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_help();
             0
@@ -62,6 +64,10 @@ fn print_help() {
   stats   [--server URL]
   dump    [--server URL]
   demo    [--workdir PATH]
+  pact    add --id X --capability Y --accept-kind file|url|command --accept-value V [--depends A,B]
+          claim --capability Y [--owner O] [--lease S]
+          finish --receipt R
+          status
   team    close <receipt> --kind file|url|command --value V [--repro CMD]
           escalate --class publish|money|access|identity --question Q --propose P --if-silent S --cost C
           algedonic «что горит»
@@ -251,9 +257,15 @@ fn cmd_serve(args: &[String]) -> i32 {
         Some(PathBuf::from(&store))
     };
     let require_evidence = opts.has("require-evidence");
+    let policy_path = opts
+        .flag("policy")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("data/team/policy.json"));
+    let policy = Policy::load(&policy_path);
     let space =
         Arc::new(Space::new(path, capacity, lease).with_evidence_required(require_evidence));
     let stats = space.stats();
+    let board = Arc::new(PactBoard::new(Arc::clone(&space), policy));
     println!(
         "store: {}; в пространстве {}, в работе {}, ёмкость {}, аренда по умолчанию {}s",
         if store.is_empty() {
@@ -266,7 +278,7 @@ fn cmd_serve(args: &[String]) -> i32 {
         stats.capacity,
         stats.default_lease
     );
-    match Server::bind(&format!("{host}:{port}"), space) {
+    match Server::bind(&format!("{host}:{port}"), board) {
         Ok(server) => {
             server.serve_forever();
             0
@@ -320,7 +332,7 @@ fn cmd_rd(args: &[String]) -> i32 {
             0
         }
         404 => {
-            println!("HTTP 404 — {}", body["error"]);
+            println!("HTTP 404 — {}", body["error"].as_str().unwrap_or(""));
             2
         }
         _ => {
@@ -359,7 +371,7 @@ fn cmd_take(args: &[String]) -> i32 {
             0
         }
         404 => {
-            println!("HTTP 404 — {}", body["error"]);
+            println!("HTTP 404 — {}", body["error"].as_str().unwrap_or(""));
             2
         }
         _ => {
@@ -567,6 +579,116 @@ fn cmd_team(args: &[String]) -> i32 {
         }
         other => {
             eprintln!("неизвестное действие team: {other}");
+            2
+        }
+    }
+}
+
+// --- договоры на работу --------------------------------------------------------------
+fn cmd_pact(args: &[String]) -> i32 {
+    let Some(action) = args.first().map(String::as_str) else {
+        eprintln!("нужно: pact add|claim|finish|status");
+        return 2;
+    };
+    let opts = Opts::parse(&args[1..]);
+    match action {
+        "add" => {
+            let pact = Pact {
+                id: opts.flag("id").unwrap_or("").to_string(),
+                capability: opts.flag("capability").unwrap_or("").to_string(),
+                priority: opts.number("priority").unwrap_or(0.0) as i64,
+                depends_on: opts
+                    .flag("depends")
+                    .map(|raw| {
+                        raw.split(',')
+                            .map(|part| part.trim().to_string())
+                            .filter(|part| !part.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                accepts: Evidence {
+                    kind: opts.flag("accept-kind").unwrap_or("file").to_string(),
+                    value: opts.flag("accept-value").unwrap_or("").to_string(),
+                    repro: opts.flag("repro").unwrap_or("").to_string(),
+                },
+                note: opts.flag("note").unwrap_or("").to_string(),
+            };
+            let (code, body) = post(&opts.server(), "/pact/add", &json!({"pact": pact}), 0.0);
+            println!("HTTP {code} {body}");
+            if code == 201 {
+                0
+            } else {
+                1
+            }
+        }
+        "claim" => {
+            let mut payload = json!({
+                "capability": opts.flag("capability").unwrap_or("*"),
+                "owner": opts.flag("owner").unwrap_or(""),
+            });
+            if let Some(lease) = opts.number("lease") {
+                payload["lease"] = json!(lease);
+            }
+            let (code, body) = post(&opts.server(), "/pact/claim", &payload, 0.0);
+            if code != 200 {
+                println!("HTTP {code} — {}", body["error"].as_str().unwrap_or(""));
+                return 2;
+            }
+            println!(
+                "договор {}: {}",
+                body["pact"]["id"].as_str().unwrap_or(""),
+                body["pact"]["capability"].as_str().unwrap_or("")
+            );
+            println!(
+                "приёмка: {} — {}",
+                body["pact"]["accepts"]["kind"].as_str().unwrap_or(""),
+                body["pact"]["accepts"]["value"].as_str().unwrap_or("")
+            );
+            println!(
+                "receipt: {} (аренда {}s)",
+                body["receipt"].as_str().unwrap_or(""),
+                body["lease_in"]
+            );
+            0
+        }
+        "finish" => {
+            let receipt = match opts
+                .flag("receipt")
+                .or_else(|| opts.positional.first().map(String::as_str))
+            {
+                Some(receipt) => receipt.to_string(),
+                None => {
+                    eprintln!("нужен receipt: pact finish --receipt r-…");
+                    return 2;
+                }
+            };
+            let (code, body) = post(
+                &opts.server(),
+                "/pact/finish",
+                &json!({"receipt": receipt}),
+                0.0,
+            );
+            println!("HTTP {code} {body}");
+            if code == 200 {
+                0
+            } else {
+                1
+            }
+        }
+        "status" => {
+            let (code, body) = get(&opts.server(), "/pact/status");
+            if code != 200 {
+                eprintln!("HTTP {code} {body}");
+                return 1;
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            );
+            0
+        }
+        other => {
+            eprintln!("неизвестное действие pact: {other}");
             2
         }
     }

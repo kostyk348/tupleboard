@@ -13,7 +13,8 @@
 //! 429 (мест нет, backpressure) с `Retry-After`.
 //! ```
 
-use crate::space::{Ack, Error as SpaceError, Space};
+use crate::pact::{Pact, PactBoard};
+use crate::space::{Ack, Error as SpaceError};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -27,14 +28,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct Server {
     listener: TcpListener,
-    space: Arc<Space>,
+    board: Arc<PactBoard>,
 }
 
 impl Server {
-    pub fn bind(addr: &str, space: Arc<Space>) -> std::io::Result<Self> {
+    pub fn bind(addr: &str, board: Arc<PactBoard>) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         eprintln!("пространство слушает http://{}", listener.local_addr()?);
-        Ok(Self { listener, space })
+        Ok(Self { listener, board })
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -46,9 +47,9 @@ impl Server {
         for stream in self.listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let space = Arc::clone(&self.space);
+                    let board = Arc::clone(&self.board);
                     thread::spawn(move || {
-                        if let Err(err) = handle(stream, &space) {
+                        if let Err(err) = handle(stream, &board) {
                             eprintln!("соединение: {err}");
                         }
                     });
@@ -134,12 +135,12 @@ fn reason(code: u16) -> &'static str {
     }
 }
 
-fn handle(mut stream: TcpStream, space: &Arc<Space>) -> std::io::Result<()> {
+fn handle(mut stream: TcpStream, board: &Arc<PactBoard>) -> std::io::Result<()> {
     let Some(request) = read_request(&mut stream)? else {
         return Ok(());
     };
     let payload = parse_json(&request.body);
-    let (code, body, extra) = route(&request, payload, space);
+    let (code, body, extra) = route(&request, payload, board);
     write_response(&mut stream, code, &body, &extra)
 }
 
@@ -154,8 +155,9 @@ fn parse_json(body: &[u8]) -> std::result::Result<Value, SpaceError> {
 fn route(
     request: &Request,
     payload: std::result::Result<Value, SpaceError>,
-    space: &Arc<Space>,
+    board: &Arc<PactBoard>,
 ) -> (u16, Value, Vec<(&'static str, &'static str)>) {
+    let space = board.space();
     let path = request.path.split('?').next().unwrap_or("/").to_string();
     if request.method == "GET" {
         return match path.as_str() {
@@ -169,6 +171,7 @@ fn route(
             }
             "/stats" => (200, json!(space.stats()), vec![]),
             "/tuples" => (200, space.dump(), vec![]),
+            "/pact/status" => (200, board.status(), vec![]),
             _ => (404, json!({"error": "нет такого пути"}), vec![]),
         };
     }
@@ -179,7 +182,7 @@ fn route(
         Ok(value) => value,
         Err(err) => return failure(err),
     };
-    match call(&path, &payload, space) {
+    match call(&path, &payload, board) {
         Ok(response) => response,
         Err(err) => failure(err),
     }
@@ -188,8 +191,9 @@ fn route(
 fn call(
     path: &str,
     payload: &Value,
-    space: &Arc<Space>,
+    board: &Arc<PactBoard>,
 ) -> std::result::Result<(u16, Value, Vec<(&'static str, &'static str)>), SpaceError> {
+    let space = board.space();
     let timeout = payload
         .get("timeout")
         .and_then(Value::as_f64)
@@ -281,6 +285,53 @@ fn call(
                     vec![],
                 )),
             }
+        }
+        "/pact/add" => {
+            let parsed: std::result::Result<Pact, _> = payload
+                .get("pact")
+                .cloned()
+                .ok_or_else(|| {
+                    serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "нет поля pact",
+                    ))
+                })
+                .and_then(serde_json::from_value);
+            match parsed {
+                Ok(pact) => {
+                    let storage_id = board.add(&pact)?;
+                    Ok((201, json!({"id": storage_id, "pact": pact.id}), vec![]))
+                }
+                Err(err) => Err(crate::space::BadPattern::new(format!(
+                    "нужен объект pact {{id, capability, accepts{{kind,value,repro}}}}: {err}"
+                ))
+                .into()),
+            }
+        }
+        "/pact/claim" => {
+            let capability = payload
+                .get("capability")
+                .and_then(Value::as_str)
+                .unwrap_or("*");
+            let owner = payload.get("owner").and_then(Value::as_str).unwrap_or("");
+            let lease = payload.get("lease").and_then(Value::as_f64);
+            match board.claim(capability, owner, lease)? {
+                Some(claim) => Ok((200, json!(claim), vec![])),
+                None => Ok((
+                    404,
+                    json!({"error": "подходящих договоров нет (или все ждут зависимостей)"}),
+                    vec![],
+                )),
+            }
+        }
+        "/pact/finish" => {
+            let receipt = payload.get("receipt").and_then(Value::as_str).unwrap_or("");
+            let fields = match payload.get("fields").cloned() {
+                Some(fields) => fields,
+                None => space.flight_fields(receipt).unwrap_or(Value::Null),
+            };
+            let outcome = board.finish(receipt, &fields)?;
+            Ok((200, json!(outcome), vec![]))
         }
         _ => Ok((404, json!({"error": "нет такого пути"}), vec![])),
     }

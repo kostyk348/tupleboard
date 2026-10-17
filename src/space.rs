@@ -526,6 +526,27 @@ impl Space {
 
     /// Подтвердить выполнение. С включённым правилом доказательство обязательно:
     /// «сделано» — это артефакт (вывод команды, URL, лог), а не заявление.
+    /// Файл состояния (если пространство на диске).
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
+    }
+
+    /// Поля взятого кортежа по receipt (для приёмки без повторной передачи данных).
+    pub fn flight_fields(&self, receipt: &str) -> Option<Value> {
+        self.lock()
+            .in_flight
+            .get(receipt)
+            .map(|flight| flight.item.fields.clone())
+    }
+
+    /// Сколько раз эту работу уже брали (для правил «после N неудач расторгаем»).
+    pub fn flight_attempts(&self, receipt: &str) -> Option<u32> {
+        self.lock()
+            .in_flight
+            .get(receipt)
+            .map(|flight| flight.item.attempts)
+    }
+
     pub fn ack(&self, receipt: &str, evidence: Option<&str>) -> Ack {
         let mut state = self.lock();
         if !state.in_flight.contains_key(receipt) {
