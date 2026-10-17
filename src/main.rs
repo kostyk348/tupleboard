@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use tupleboard::server::Server;
 use tupleboard::space::Space;
+use tupleboard::team::{Escalation, Evidence, Policy, Team, Verdict};
 
 const DEFAULT_SERVER: &str = "http://127.0.0.1:8801";
 
@@ -33,6 +34,7 @@ fn main() {
         Some("stats") => cmd_stats(&args[1..]),
         Some("dump") => cmd_dump(&args[1..]),
         Some("demo") => cmd_demo(&args[1..]),
+        Some("team") => cmd_team(&args[1..]),
         Some("--help") | Some("-h") | None => {
             print_help();
             0
@@ -60,6 +62,11 @@ fn print_help() {
   stats   [--server URL]
   dump    [--server URL]
   demo    [--workdir PATH]
+  team    close <receipt> --kind file|url|command --value V [--repro CMD]
+          escalate --class publish|money|access|identity --question Q --propose P --if-silent S --cost C
+          algedonic «что горит»
+          audit [--limit N]
+          status
 
 Шаблон: точные значения, \"*\" — любое, \"?имя\" — связать значение.
 Пример: take '[\"translate\",\"?doc\"]' --lease 30 --owner agent-1"
@@ -439,6 +446,132 @@ fn cmd_dump(args: &[String]) -> i32 {
     0
 }
 
+// --- командный слой -----------------------------------------------------------------
+fn cmd_team(args: &[String]) -> i32 {
+    let Some(action) = args.first().map(String::as_str) else {
+        eprintln!("нужно: team close|escalate|algedonic|audit|status");
+        return 2;
+    };
+    let rest = &args[1..];
+    let opts = Opts::parse(rest);
+    let dir = opts
+        .flag("dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("data/team"));
+    let policy = Policy::load(&dir.join("policy.json"));
+    let team = Team::new(dir.clone(), policy);
+
+    match action {
+        "close" => {
+            let Some(receipt) = opts.positional.first() else {
+                eprintln!("нужен receipt: team close r-… --kind file --value PATH");
+                return 2;
+            };
+            let evidence = Evidence {
+                kind: opts.flag("kind").unwrap_or("file").to_string(),
+                value: opts.flag("value").unwrap_or("").to_string(),
+                repro: opts.flag("repro").unwrap_or("").to_string(),
+            };
+            match team.close(receipt, &evidence) {
+                Ok(verdict) => {
+                    let text = format!("{}: {}", evidence.kind, evidence.value);
+                    let (code, body) = post(
+                        &opts.server(),
+                        "/ack",
+                        &json!({"receipt": receipt, "evidence": text}),
+                        0.0,
+                    );
+                    println!(
+                        "закрытие: HTTP {code} {}; аудит: {} {}",
+                        body["acked"],
+                        verdict.as_str(),
+                        verdict.why()
+                    );
+                    if code == 200 || code == 422 {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Err(problem) => {
+                    eprintln!("не закрываю: {problem}");
+                    1
+                }
+            }
+        }
+        "escalate" => {
+            let escalation = Escalation {
+                class: opts.flag("class").unwrap_or("").to_string(),
+                question: opts.flag("question").unwrap_or("").to_string(),
+                propose: opts.flag("propose").unwrap_or("").to_string(),
+                if_silent: opts.flag("if-silent").unwrap_or("").to_string(),
+                cost: opts.flag("cost").unwrap_or("").to_string(),
+            };
+            match team.escalate(&escalation) {
+                Ok(()) => {
+                    println!(
+                        "эскалация принята: класс {} — вопрос ушёл владельцу с тремя частями",
+                        escalation.class
+                    );
+                    0
+                }
+                Err(problem) => {
+                    eprintln!("эскалация отклонена: {problem}");
+                    1
+                }
+            }
+        }
+        "algedonic" => {
+            let Some(alert) = opts.positional.first() else {
+                eprintln!("нужно: team algedonic \"что горит\"");
+                return 2;
+            };
+            match team.algedonic(alert) {
+                Ok(count) => {
+                    println!("аварийный сигнал отправлен ({count} за час)");
+                    0
+                }
+                Err(problem) => {
+                    eprintln!("сигнал не отправлен: {problem}");
+                    1
+                }
+            }
+        }
+        "audit" => {
+            let report = team.audit_all(opts.number("limit").map(|value| value as usize));
+            println!(
+                "проверено {}: подтверждено {}, расхождений {}, не проверено {}",
+                report.checked, report.confirmed, report.mismatched, report.unverifiable
+            );
+            for problem in &report.problems {
+                println!("  {problem}");
+            }
+            if report.mismatched == 0 {
+                0
+            } else {
+                1
+            }
+        }
+        "status" => {
+            let report = team.audit_all(None);
+            println!("журнал: {}", dir.display());
+            println!(
+                "закрытий {}, из них подтверждается сейчас {}",
+                report.checked, report.confirmed
+            );
+            println!(
+                "расхождений {}, не проверено {}",
+                report.mismatched, report.unverifiable
+            );
+            0
+        }
+        other => {
+            eprintln!("неизвестное действие team: {other}");
+            2
+        }
+    }
+}
+
 // --- демонстрация -----------------------------------------------------------------
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -716,6 +849,69 @@ fn cmd_demo(args: &[String]) -> i32 {
 
     let _ = server.kill();
     let _ = server.wait();
+
+    println!("\n8. командный слой: доказательство, аудит, эскалация, алгедоника");
+    let team = Team::new(work.join("team"), Policy::default());
+    let ghost = Evidence {
+        kind: "file".into(),
+        value: work.join("нет-такого-файла").display().to_string(),
+        repro: String::new(),
+    };
+    let verdict = team
+        .close("r-demo-1", &ghost)
+        .unwrap_or(Verdict::Unverifiable("?".into()));
+    check(
+        &mut checks,
+        "закрытие без артефакта записано как mismatch",
+        matches!(verdict, Verdict::Mismatch(_)),
+        &format!("{verdict:?}"),
+    );
+    let real = work.join("artifact.txt");
+    let _ = std::fs::write(&real, "готово");
+    let good = Evidence {
+        kind: "file".into(),
+        value: real.display().to_string(),
+        repro: String::new(),
+    };
+    check(
+        &mut checks,
+        "настоящий артефакт подтверждён",
+        matches!(team.close("r-demo-2", &good), Ok(Verdict::Confirmed)),
+        "",
+    );
+    let report = team.audit_all(None);
+    check(
+        &mut checks,
+        "аудит: одно подтверждено, одно расхождение",
+        report.checked == 2 && report.confirmed == 1 && report.mismatched == 1,
+        &format!("{report:?}"),
+    );
+    let wrong_class = Escalation {
+        class: "как лучше".into(),
+        question: "?".into(),
+        propose: "p".into(),
+        if_silent: "s".into(),
+        cost: "c".into(),
+    };
+    check(
+        &mut checks,
+        "эскалация вне четырёх классов отклонена",
+        team.escalate(&wrong_class).is_err(),
+        "",
+    );
+    let (mut sent, mut refused) = (0, 0);
+    for _ in 0..4 {
+        match team.algedonic("диск 100%") {
+            Ok(_) => sent += 1,
+            Err(_) => refused += 1,
+        }
+    }
+    check(
+        &mut checks,
+        "алгедоника: три сигнала ушли, четвёртый остановлен лимитом",
+        sent == 3 && refused == 1,
+        &format!("успело {sent}, отказов {refused}"),
+    );
 
     let failed: Vec<&String> = checks
         .iter()

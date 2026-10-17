@@ -7,8 +7,10 @@
 //!
 //! * [`space`] — пространство: шаблоны, аренды, TTL, ёмкость, снимок в JSON;
 //! * [`server`] — HTTP-API поверх пространства (JSON, только std).
+//! * [`team`] — командный слой: гейт доказательства, аудит (S3*), эскалация (S5), алгедоника.
 
 pub mod server;
 pub mod space;
+pub mod team;
 
 pub use space::{BadPattern, Space, SpaceFull, Stats};

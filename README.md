@@ -7,8 +7,8 @@
 Rust, одна зависимость (`serde`/`serde_json` — формат на проводе), HTTP на `std::net`.
 
 ```bash
-cargo test          # 27 тестов
-cargo run -- demo   # 18 проверок: падение агента, kill -9 сервера, backpressure
+cargo test          # 37 тестов
+cargo run -- demo   # 23 проверки: падение агента, kill -9 сервера, backpressure, аудит
 ```
 
 ## Откуда это
@@ -60,7 +60,7 @@ cargo run -- stats
 6. backpressure: полное пространство отказывает честно
   ✓ лишняя задача отклонена 429
 
-итог: проверок 18, провалено 0 — работает
+итог: проверок 23, провалено 0 — работает
 ```
 
 ## Шаблоны
@@ -101,6 +101,37 @@ cargo run -- stats
 2. **Гейт доказательства.** `ack` без `evidence` при `--require-evidence` — отказ `422`.
    «Сделано» — это артефакт (вывод команды, URL, лог), а не заявление.
 3. **Ёмкость.** Полное пространство отвечает `429` с причиной вместо бесконечного роста.
+
+## Командный слой: аудит, эскалация, алгедоника
+
+Поверх пространства — четыре контура из `src/team.rs`. Это та часть, которой нет ни в канбане,
+ни в брокерах: **доказательство перепроверяется, а не читается**.
+
+```bash
+# закрыть работу можно только с артефактом; аудит проверяет артефакт сразу
+tupleboard team close r-abc123 --kind file --value /tmp/doc-1.ru.pdf
+tupleboard team close r-def456 --kind url  --value https://github.com/kostyk348/tupleboard
+tupleboard team close r-ghi789 --kind command --value "cargo test" --repro "cargo test" \
+    --dir data/team          # команда запускается только если она в data/team/policy.json
+
+tupleboard team audit                  # перепроверить все закрытия
+tupleboard team escalate --class publish \
+    --question "публиковать?" --propose "да, публичный" \
+    --if-silent "не публикую" --cost "час простоя"
+tupleboard team algedonic "диск 100%"  # авария в обход уровней, не чаще 3 раз в час
+```
+
+| контур | что делает | отказ |
+|---|---|---|
+| гейт доказательства | закрытие без артефакта | `422` «нет доказательства — нет закрытия» |
+| аудит (S3\*) | файл существует / URL 2xx / команда из allow-list вернула 0 | `mismatch` или `unverifiable`, а не «ок» |
+| эскалация (S5) | только 4 класса: `publish`, `money`, `access`, `identity`, и три части в вопросе | отказ с объяснением, что решается внутри |
+| алгедоника | аварийный сигнал в обход уровней, лимит 3/час | «это не авария, а состояние — чините в обычном контуре» |
+
+Журналы лежат в `data/team/` (`closed.jsonl`, `escalations.jsonl`, `algedonic.jsonl`),
+политика — в `data/team/policy.json` (см. `policy.example.json`).
+
+Обоснование и карта команды по VSM Бира — [`docs/TEAM-CYBERNETICS.md`](docs/TEAM-CYBERNETICS.md).
 
 ## Где это НЕ нужно (важно)
 

@@ -1,0 +1,8 @@
+{
+  "allowed_commands": [
+    "cargo test",
+    "cargo test --all-targets",
+    "python3 -m unittest discover -s tests -t ."
+  ],
+  "algedonic_per_hour": 3
+}
