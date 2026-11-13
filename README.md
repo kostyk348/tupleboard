@@ -1,4 +1,19 @@
+<div align="center">
+
+<img src="docs/banner.svg" alt="tupleboard banner" width="1000">
+
 # tupleboard
+
+### Пространство кортежей с арендами: ассоциативная доска для агентов (Linda/JavaSpaces, Rust)
+
+[![CI](https://github.com/kostyk348/tupleboard/actions/workflows/tests.yml/badge.svg)](https://github.com/kostyk348/tupleboard/actions/workflows/tests.yml)
+[![Release](https://img.shields.io/github/v/release/kostyk348/tupleboard?sort=semver&color=0ea5e9&label=release)](https://github.com/kostyk348/tupleboard/releases)
+[![Language](https://img.shields.io/badge/lang-Rust-blueviolet)](https://github.com/kostyk348/tupleboard)
+
+</div>
+
+---
+
 
 Пространство кортежей с арендами: **ассоциативная разделяемая память для агентов**, а не
 очередь в топик. Производитель кладёт задачу, потребитель ищет её **по шаблону**; взятая
